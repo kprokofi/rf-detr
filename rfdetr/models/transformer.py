@@ -70,12 +70,12 @@ def gen_sineembed_for_position(pos_tensor, dim=128):
     return pos
 
 
-def gen_encoder_output_proposals(memory, memory_padding_mask, spatial_shapes, unsigmoid=True):
+def gen_encoder_output_proposals(memory, memory_padding_mask, spatial_shapes_list, unsigmoid=True):
     r"""
     Input:
         - memory: bs, \sum{hw}, d_model
         - memory_padding_mask: bs, \sum{hw}
-        - spatial_shapes: nlevel, 2
+        - spatial_shapes_list: list of (H, W) tuples as Python integers (torch.export compatible)
     Output:
         - output_memory: bs, \sum{hw}, d_model
         - output_proposals: bs, \sum{hw}, 4
@@ -83,14 +83,17 @@ def gen_encoder_output_proposals(memory, memory_padding_mask, spatial_shapes, un
     N_, S_, C_ = memory.shape
     proposals = []
     _cur = 0
-    for lvl, (H_, W_) in enumerate(spatial_shapes):
+    
+    # spatial_shapes_list is now a list of (H, W) tuples with Python integers
+    for lvl, (H_, W_) in enumerate(spatial_shapes_list):
         if memory_padding_mask is not None:
             mask_flatten_ = memory_padding_mask[:, _cur:(_cur + H_ * W_)].view(N_, H_, W_, 1)
             valid_H = torch.sum(~mask_flatten_[:, :, 0, 0], 1)
             valid_W = torch.sum(~mask_flatten_[:, 0, :, 0], 1)
         else:
-            valid_H = torch.tensor([H_ for _ in range(N_)], device=memory.device)
-            valid_W = torch.tensor([W_ for _ in range(N_)], device=memory.device)
+            # torch.export compatible: use full() instead of tensor([...])
+            valid_H = torch.full((N_,), H_, dtype=torch.float32, device=memory.device)
+            valid_W = torch.full((N_,), W_, dtype=torch.float32, device=memory.device)
 
         grid_y, grid_x = torch.meshgrid(torch.linspace(0, H_ - 1, H_, dtype=torch.float32, device=memory.device),
                                         torch.linspace(0, W_ - 1, W_, dtype=torch.float32, device=memory.device))
@@ -200,12 +203,13 @@ class Transformer(nn.Module):
         src_flatten = []
         mask_flatten = [] if masks is not None else None
         lvl_pos_embed_flatten = []
-        spatial_shapes = []
+        # Keep spatial shapes as list of (h, w) Python integer tuples for torch.export compatibility
+        spatial_shapes_list = []
         valid_ratios = [] if masks is not None else None
         for lvl, (src, pos_embed) in enumerate(zip(srcs, pos_embeds)):
             bs, c, h, w = src.shape
-            spatial_shape = (h, w)
-            spatial_shapes.append(spatial_shape)
+            # Keep h, w as Python integers (from shape extraction)
+            spatial_shapes_list.append((h, w))
 
             src = src.flatten(2).transpose(1, 2)                # bs, hw, c
             pos_embed = pos_embed.flatten(2).transpose(1, 2)    # bs, hw, c
@@ -219,12 +223,14 @@ class Transformer(nn.Module):
             mask_flatten = torch.cat(mask_flatten, 1)   # bs, \sum{hxw}
             valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
         lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1) # bs, \sum{hxw}, c
-        spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=memory.device)
+        # Create spatial_shapes tensor for level_start_index calculation
+        spatial_shapes = torch.tensor(spatial_shapes_list, dtype=torch.long, device=srcs[0].device)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
 
         if self.two_stage:
+            # Pass list of (h, w) tuples for torch.export compatibility
             output_memory, output_proposals = gen_encoder_output_proposals(
-                memory, mask_flatten, spatial_shapes, unsigmoid=not self.bbox_reparam)
+                memory, mask_flatten, spatial_shapes_list, unsigmoid=not self.bbox_reparam)
             # group detr for first stage
             refpoint_embed_ts, memory_ts, boxes_ts = [], [], []
             group_detr = self.group_detr if self.training else 1
