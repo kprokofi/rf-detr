@@ -49,7 +49,7 @@ dependencies = [
     "supervision",
     "matplotlib",
     "roboflow",
-    "pillow-avif-plugin"
+    "pillow-avif-plugin==1.5.5"
 ]
 
 [project.optional-dependencies]
